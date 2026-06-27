@@ -138,6 +138,12 @@ void setupWiFi() {
   Serial.printf("\r\n[Wifi]: Ladowanie");
   WiFi.setSleep(false); 
   WiFi.setAutoReconnect(true);
+
+  // Wymuszenie publicznych, niezawodnych serwerów DNS (Google i Cloudflare)
+  // Parametry: IP, Bramka, Maska, DNS 1, DNS 2
+  // Zostawiając pierwsze trzy jako INADDR_NONE (lub 0U), IP nadal jest przydzielane automatycznie!
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   while (WiFi.status() != WL_CONNECTED) {
