@@ -1,60 +1,64 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <Preferences.h>     // Biblioteka do pamiętania pozycji rolety (0-100%)
+#include <Preferences.h>     
 #include "SinricPro.h"
 #include "SinricProBlinds.h"
-#include "secrets.h"         // Twój plik z WIFI_SSID i WIFI_PASSWORD
+#include "secrets.h"         
 
-// --- KONFIGURACJA SINRIC PRO ---
-#define BAUD_RATE         115200                
+#define BAUD_RATE         9600                
 
-// --- DEFINICJA PINÓW (TYLKO GÓRA, DÓŁ, OK) ---
+// --- DEFINICJA PINÓW ---
 const int PIN_OK    = 4;
 const int PIN_GORA  = 3;
 const int PIN_DOL   = 0;
 
 // --- USTAWIENIA CZASOWE ---
-const unsigned long CZAS_PELNEGO_OTWARCIA_MS = 20000; 
+const unsigned long CZAS_PELNEGO_OTWARCIA_MS = 23000; 
 const int CZAS_IMPULSU_MS = 500; 
 
 // --- PAMIĘĆ I STAN ---
 Preferences pamiec;
 
-// Zmienne globalne rolety
-int aktualnaPozycja = 100; // 100 = otwarta, 0 = zamknięta
+int aktualnaPozycja = 100; 
+int pozycjaStartowa = 100; // Zmienna pomocnicza do precyzyjnego wyliczania STOP
 bool wRuchu = false;
 int kierunek = 0;          // 1 = góra, -1 = dół
 unsigned long czasRozpoczeciaRuchu = 0;
 unsigned long czasDoZatrzymania = 0;
 
 // ====================================================================
-// LOGIKA PILOTA I PAMIĘCI
+// LOGIKA PILOTA
 // ====================================================================
 
 void kliknijPrzycisk(int pin) {
+  Serial.printf("[Sprzet] Ustawiam PIN %d na HIGH na %d ms...\r\n", pin, CZAS_IMPULSU_MS);
   digitalWrite(pin, HIGH);
   delay(CZAS_IMPULSU_MS);
   digitalWrite(pin, LOW);
+  Serial.printf("[Sprzet] PIN %d wrocial na LOW.\r\n", pin);
 }
 
-// Zapis pozycji (procentowej) po jej osiągnięciu, żeby przetrwała reset układu
 void zapiszPozycjeRolety() {
   pamiec.putInt("pozycja", aktualnaPozycja);
-  Serial.printf("Zapisano pozycje %d%% do pamieci Flash.\r\n", aktualnaPozycja);
+  Serial.printf("[Pamiec] Twardy zapis pozycji w pamieci Flash: %d%%\r\n", aktualnaPozycja);
 }
 
 void obslugaRuchuRolety() {
   if (wRuchu) {
     if (millis() - czasRozpoczeciaRuchu >= czasDoZatrzymania) {
+      Serial.println("\r\n====================================");
+      Serial.println("[Zegar] Czas jazdy minal!");
       
-      // Zatrzymujemy tylko pozycje pośrednie (nie 0%, nie 100%)
       if (aktualnaPozycja != 0 && aktualnaPozycja != 100) {
-        Serial.println("Osiagnieto pozycje posrednia. Wciskam STOP (OK).");
+        Serial.println("[Decyzja] Pozycja posrednia. Wysylam fizyczny sygnal STOP (PIN_OK).");
         kliknijPrzycisk(PIN_OK);                
+      } else {
+        Serial.println("[Decyzja] Pozycja skrajna (0 lub 100). Nic nie klikam, krancowka w oknie sama wylaczy silnik.");
       }
       
       wRuchu = false;
-      zapiszPozycjeRolety(); // Zapisujemy nową pozycję na twardo
+      zapiszPozycjeRolety();
+      Serial.println("====================================\r\n");
     }
   }
 }
@@ -63,37 +67,45 @@ void obslugaRuchuRolety() {
 // CALLBACKI SINRIC PRO
 // ====================================================================
 
-// 1. Zmiana pozycji z suwaka (Google Home / Sinric App)
 bool onRangeValue(const String &deviceId, int &pozycjaDocelowa) {
-  if (pozycjaDocelowa == aktualnaPozycja) return true;
-
-  Serial.printf("Zmiana pozycji rolet z %d na %d\r\n", aktualnaPozycja, pozycjaDocelowa);
+  Serial.println("\r\n====================================");
+  Serial.printf("[Sinric] Nowe zadanie: Zmien pozycje z %d%% na %d%%\r\n", aktualnaPozycja, pozycjaDocelowa);
   
+  if (pozycjaDocelowa == aktualnaPozycja) {
+    Serial.println("[Sinric] Roleta jest juz w tej pozycji. Ignoruje.");
+    Serial.println("====================================\r\n");
+    return true;
+  }
+
+  pozycjaStartowa = aktualnaPozycja; // Zapisujemy skąd ruszamy, na wypadek nagłego STOP
+  
+// LOGIKA KIERUNKU: 100% = Pełne OTWARCIE (Roleta na GÓRZE)
   if (pozycjaDocelowa > aktualnaPozycja) {
+    Serial.println("[Silnik] Otwieram rolete (procenty rosna). Klikam PIN_GORA.");
     kliknijPrzycisk(PIN_GORA);
     kierunek = 1;
   } else {
+    Serial.println("[Silnik] Zamykam rolete (procenty maleja). Klikam PIN_DOL.");
     kliknijPrzycisk(PIN_DOL);
     kierunek = -1;
   }
-
-  // Obliczenie czasu jazdy
   int roznica = abs(pozycjaDocelowa - aktualnaPozycja);
   czasDoZatrzymania = (CZAS_PELNEGO_OTWARCIA_MS * roznica) / 100;
+  Serial.printf("[Matematyka] Procent do przejechania: %d%%. Wyliczony czas: %lu ms\r\n", roznica, czasDoZatrzymania);
   
-  // Margines dla pozycji skrajnych, by krańcówka sama się rozłączyła
   if (pozycjaDocelowa == 0 || pozycjaDocelowa == 100) {
     czasDoZatrzymania += 2000; 
+    Serial.println("[Silnik] Cel to krancowka. Dodano 2000 ms zapasu bezpieczenstwa.");
   }
 
   czasRozpoczeciaRuchu = millis();
   wRuchu = true;
-  aktualnaPozycja = pozycjaDocelowa;
+  aktualnaPozycja = pozycjaDocelowa; // Ustawiamy stan dla aplikacji
   
+  Serial.println("====================================\r\n");
   return true;
 }
 
-// Względna zmiana pozycji (np. "podnieś o 10%")
 bool onAdjustRangeValue(const String &deviceId, int &positionDelta) {
   int nowaPozycja = aktualnaPozycja + positionDelta;
   if (nowaPozycja > 100) nowaPozycja = 100;
@@ -103,20 +115,21 @@ bool onAdjustRangeValue(const String &deviceId, int &positionDelta) {
   return onRangeValue(deviceId, nowaPozycja);
 }
 
-// 2. Przycisk ON/OFF działa jako natychmiastowy STOP / Obliczenie pozycji w locie
 bool onPowerState(const String &deviceId, bool &state) {
-  Serial.println("Wymuszono STOP dla rolet");
+  Serial.println("\r\n====================================");
+  Serial.println("[Sinric] Wcisnieto Glowny Przycisk ON/OFF. Traktuje to jako komende STOP!");
   kliknijPrzycisk(PIN_OK);
 
-  // Jeśli roleta właśnie jechała, obliczamy gdzie zatrzymaliśmy ją w połowie drogi
   if (wRuchu) {
     unsigned long mineloCzasu = millis() - czasRozpoczeciaRuchu;
     int procentPrzejechany = (mineloCzasu * 100) / CZAS_PELNEGO_OTWARCIA_MS;
     
+    Serial.printf("[Stop] Roleta jechala przez %lu ms, co daje ok. %d%%\r\n", mineloCzasu, procentPrzejechany);
+    
     if (kierunek == 1) { // Jechała w górę
-      aktualnaPozycja = aktualnaPozycja - abs(100 - aktualnaPozycja) + procentPrzejechany;
+      aktualnaPozycja = pozycjaStartowa + procentPrzejechany;
     } else { // Jechała w dół
-      aktualnaPozycja = aktualnaPozycja + abs(aktualnaPozycja) - procentPrzejechany;
+      aktualnaPozycja = pozycjaStartowa - procentPrzejechany;
     }
     
     if (aktualnaPozycja > 100) aktualnaPozycja = 100;
@@ -124,9 +137,12 @@ bool onPowerState(const String &deviceId, bool &state) {
     
     wRuchu = false;
     zapiszPozycjeRolety();
-    Serial.printf("Pozycja po recznym zatrzymaniu: %d%%\r\n", aktualnaPozycja);
+    Serial.printf("[Stop] Skorygowano pozycje rolety. Obecnie znajduje sie na: %d%%\r\n", aktualnaPozycja);
+  } else {
+    Serial.println("[Stop] Roleta nie byla w ruchu. Wysłano tylko sygnał do pilota.");
   }
 
+  Serial.println("====================================\r\n");
   return true; 
 }
 
@@ -138,12 +154,7 @@ void setupWiFi() {
   Serial.printf("\r\n[Wifi]: Ladowanie");
   WiFi.setSleep(false); 
   WiFi.setAutoReconnect(true);
-
-  // Wymuszenie publicznych, niezawodnych serwerów DNS (Google i Cloudflare)
-  // Parametry: IP, Bramka, Maska, DNS 1, DNS 2
-  // Zostawiając pierwsze trzy jako INADDR_NONE (lub 0U), IP nadal jest przydzielane automatycznie!
   WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
-
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -168,12 +179,10 @@ void setup() {
   Serial.begin(BAUD_RATE); 
   Serial.printf("\r\n\r\n");
 
-  // Inicjalizacja pamięci Flash (odczytujemy, na ilu procentach staneły rolety przed brakiem prądu)
   pamiec.begin("rolety", false);
-  aktualnaPozycja = pamiec.getInt("pozycja", 100); 
-  Serial.printf("Wczytano pamiec: Pozycja startowa to %d%%\r\n", aktualnaPozycja);
+  aktualnaPozycja = pamiec.getInt("pozycja", 0); 
+  Serial.printf("[Start] Wczytano pamiec: Pozycja startowa to %d%%\r\n", aktualnaPozycja);
 
-  // Inicjalizacja pinów dla transoptorów
   pinMode(PIN_OK, OUTPUT);
   pinMode(PIN_GORA, OUTPUT);
   pinMode(PIN_DOL, OUTPUT);
@@ -205,7 +214,7 @@ void loop() {
 // const int PIN_GORA  = 3;
 // const int PIN_DOL   = 0; // Pamiętaj o uwadze sprzętowej (strapping pin)!
 // const int PIN_LEWO  = 1;
-// const int PIN_PRAWO = 5;
+// const int PIN_PRAWO = 10;
 
 // const int CZAS_IMPULSU_MS = 500; 
 
