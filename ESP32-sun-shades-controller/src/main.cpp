@@ -3,7 +3,8 @@
 #include <Preferences.h>     
 #include "SinricPro.h"
 #include "SinricProBlinds.h"
-#include "secrets.h"         
+#include "secrets.h"      
+#include "esp_system.h"   
 
 #define BAUD_RATE         9600                
 
@@ -177,8 +178,22 @@ void setupSinricPro() {
 
 void setup() {
   Serial.begin(BAUD_RATE); 
+  delay(1000); // Czekamy na USB
   Serial.printf("\r\n\r\n");
+  WiFi.mode(WIFI_STA);
 
+  // --- DIAGNOSTYKA RESTARTU ---
+  esp_reset_reason_t reason = esp_reset_reason();
+  Serial.print("[DIAGNOSTYKA] Przyczyna ostatniego restartu: ");
+  switch (reason) {
+    case ESP_RST_POWERON: Serial.println("Zwykle podlaczenie do pradu"); break;
+    case ESP_RST_PANIC:   Serial.println("PANIC / EXCEPTION - Powazny blad w kodzie lub pamieci!"); break;
+    case ESP_RST_INT_WDT: Serial.println("Watchdog (Zaciecie procesora)"); break;
+    case ESP_RST_BROWNOUT:Serial.println("BROWNOUT - Nagly spadek napiecia! (Zwarcie/Przeciazenie)"); break;
+    case ESP_RST_SW:      Serial.println("Reset programowy"); break;
+    default:              Serial.printf("Inna (Kod: %d)\n", reason);
+  }
+  Serial.println("------------------------------------");
   pamiec.begin("rolety", false);
   aktualnaPozycja = pamiec.getInt("pozycja", 0); 
   Serial.printf("[Start] Wczytano pamiec: Pozycja startowa to %d%%\r\n", aktualnaPozycja);
@@ -198,6 +213,8 @@ void setup() {
 void loop() {
   SinricPro.handle();
   obslugaRuchuRolety(); 
+
+  
 }
 //////////////////////////////////////////// kod testowy do pilota webowego (nie używany w finalnej wersji) ////////////////////////////////////////////
 
