@@ -17,6 +17,11 @@ const int PIN_DOL   = 0;
 const unsigned long CZAS_PELNEGO_OTWARCIA_MS = 23000; 
 const int CZAS_IMPULSU_MS = 500; 
 
+// --- ZMIENNE DO WATCHDOGA DNS ---
+unsigned long lastWiFiCheck = 0;
+const unsigned long WIFI_CHECK_INTERVAL = 20000; // Sprawdzaj co 20 sekund
+int dnsFailCount = 0; // Licznik błędów DNS
+
 // --- PAMIĘĆ I STAN ---
 Preferences pamiec;
 
@@ -155,7 +160,6 @@ void setupWiFi() {
   Serial.printf("\r\n[Wifi]: Ladowanie");
   WiFi.setSleep(false); 
   WiFi.setAutoReconnect(true);
-  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   while (WiFi.status() != WL_CONNECTED) {
@@ -163,6 +167,29 @@ void setupWiFi() {
     delay(250);
   }
   Serial.printf(" polaczono!\r\n[WiFi]: IP to %s\r\n", WiFi.localIP().toString().c_str());
+  
+  // --- TESTOWANIE DNS NA STARCIE ---
+  IPAddress serwerIP;
+  int probyDNS = 0;
+  
+  Serial.print("[WiFi]: Testowanie serwera DNS (ws.sinric.pro)...");
+  
+  // Próbujemy przetłumaczyć adres max 5 razy
+  while(WiFi.hostByName("ws.sinric.pro", serwerIP) != 1 && probyDNS < 5) {
+    Serial.print(" błąd! Ponawiam... ");
+    delay(2000); // Czekamy 2 sekundy przed kolejną próbą
+    probyDNS++;
+  }
+
+  // Decyzja na podstawie wyniku testu
+  if (probyDNS >= 5) {
+    Serial.println("\r\n[KRYTYCZNE]: DNS calkowicie nie dziala! Wymuszam restart ESP...");
+    delay(1000);
+    ESP.restart(); // Twardy restart procesora - często naprawia zawieszone moduły sieciowe
+  } else {
+    Serial.printf(" Sukces! IP serwera to: %s\r\n", serwerIP.toString().c_str());
+  }
+  // Usunięto zduplikowany blok oczekiwania na WiFi
 }
 
 void setupSinricPro() {
@@ -211,10 +238,43 @@ void setup() {
 }
 
 void loop() {
+  // 1. Obsługa chmury i ruchu silnika
   SinricPro.handle();
   obslugaRuchuRolety(); 
 
+  // 2. Łagodny Watchdog (bez agresywnego restartowania modułu WiFi)
+  unsigned long currentMillis = millis();
   
+  if (currentMillis - lastWiFiCheck >= WIFI_CHECK_INTERVAL) {
+    lastWiFiCheck = currentMillis; 
+
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[WiFi]: Brak polaczenia z routerem. Czekam na automatyczne wznowienie (AutoReconnect)...");
+      // USUNIĘTO: WiFi.disconnect() i WiFi.reconnect()
+      // Pozwalamy bibliotece ESP32 działać w tle.
+    } else {
+      // Jeśli mamy WiFi, robimy delikatny test DNS
+      IPAddress testIP;
+      if (WiFi.hostByName("ws.sinric.pro", testIP) == 1) {
+        if (dnsFailCount > 0) {
+          Serial.println("[Watchdog]: DNS dziala poprawnie.");
+        }
+        dnsFailCount = 0; 
+      } else {
+        dnsFailCount++;
+        Serial.printf("[Watchdog]: OSTRZEZENIE! Blad DNS. Licznik: %d/5\r\n", dnsFailCount);
+        
+        // Zwiększyliśmy tolerancję do 5 błędów (ok. 100 sekund)
+        if (dnsFailCount >= 5) {
+          Serial.println("\r\n====================================");
+          Serial.println("[KRYTYCZNE]: Krytyczny brak DNS. Wymuszam TWARDY RESTART...");
+          Serial.println("====================================\r\n");
+          delay(1000); 
+          ESP.restart(); 
+        }
+      }
+    }
+  }
 }
 //////////////////////////////////////////// kod testowy do pilota webowego (nie używany w finalnej wersji) ////////////////////////////////////////////
 
